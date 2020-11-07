@@ -1,6 +1,7 @@
 ---
 layout: article
 title: 面向对象的一些设计原则
+key: article-oop-design-principles
 ---
 
 作为一个使用面向对象编程语言的程序员，掌握一些基本的设计原则对提升我们的代码质量是很有帮助的。

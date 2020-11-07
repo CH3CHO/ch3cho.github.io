@@ -24,11 +24,8 @@ titles:
   fr-LU   : *FR
   # @end locale config
 key: page-about
+show_title: false
 ---
-
-欢迎来到我的博客。
-
-Welcome to my blog.
 
 ## 关于我 | About Me
 
