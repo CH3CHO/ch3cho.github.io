@@ -37,4 +37,3 @@ My Name is Yiquan Dong. You can also call me Kent. I am a software engineer work
 
 - Java, C#, Golang, Node.js
 - HTML5, CSS3, Javascript
-- Docker, Kubernetes
