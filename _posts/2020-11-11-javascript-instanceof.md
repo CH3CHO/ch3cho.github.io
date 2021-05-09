@@ -45,4 +45,4 @@ window.XMLHttpRequest = function(flags) {
 
 这里的代码对 `XMLHttpRequest` 进行了封装，虽然返回的还是原始的 `XMLHttpRequest` 对象，但 `window.XMLHttpRequest` 已经是封装之后的函数了，二者的原型链不一致，所以 `instanceof` 会返回 `false`。
 
-由于这个第三方库的功能目前已经不再使用，我们将其从项目中移除。移除后，截屏反馈组件就可以正常工作了。
+由于这个第三方库的功能目前已经不再使用，我们将其从项目中移除。移除后，对接的第三方组件就可以正常工作了。
