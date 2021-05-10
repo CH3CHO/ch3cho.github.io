@@ -5,7 +5,7 @@ key: article-dubbo-rpccontext-bug
 ---
 ### 问题出现
 
-我们团队基于 Apache Dubbo 开发了公司自用的 RPC 框架，整合了一些治理功能，比如限流、熔断等等。之前这个框架都是基于 Dubbo 2.7.3 开发的，今年才升级到 Dubbo 2.7.7。上周，有业务团队反馈，说升级到使用 Dubbo 2.7.7 的新版本框架之后，一个异步的服务调用中客户端出现了持续的信号量耗尽报错，且无法自行恢复。低版本框架则没有这个问题。
+我们团队基于 Apache Dubbo 开发了公司自用的 RPC 框架，整合了一些治理功能，比如限流、熔断等等。之前这个框架都是基于 Dubbo 2.7.3 开发的，今年才升级到 Dubbo 2.7.7。上周，有业务团队反馈，说升级到使用 Dubbo 2.7.7 的新版本框架之后，在一个异步的服务调用中客户端出现了持续的信号量耗尽报错，且无法自行恢复。低版本框架则没有这个问题。
 
 > Netflix 开源的 Hystrix 组件提供了信号量隔离的功能。每个请求在发出前都需要获取信号量，执行完成后释放信号量。这样就可以控制请求的并发数。
 
@@ -74,9 +74,9 @@ public class ConsumerListener implements Listener {
 
 ### 问题根因揭秘
 
-大家都知道 RpcContext 中保存的是一个请求的上下文信息。在 Dubbo 服务方法中，它里面存放的是客户端请求中传递过来的上下文。在发起一个 Dubbo 调用时，我们也可以在里面增加需要发送给服务方的一些数据。按照我的理解，RpcContext 的生命周期应该是请求级别的。一个请求处理完成后就要销毁重新构造。现在逻辑服务端到客户端的 RpcContext 和业务线程中传递给下一层的 RpcContext是同一个。
+大家都知道 RpcContext 中保存的是一个请求的上下文信息。在 Dubbo 服务方法中，它里面存放的是客户端请求中传递过来的上下文。在发起一个 Dubbo 调用时，我们也可以在里面增加需要发送给服务方的一些数据。按照我的理解，RpcContext 的生命周期应该是请求级别的。一个请求处理完成后就要销毁重新构造。
 
-但问题来了，如果我在一个 **Dubbo 服务**方法中发起多个 **Dubbo 调用**，调用我的客户端传过来的数据存在 RpcContext 里，在每个服务端调用完成之后，这个 Context 是不是就要被清理掉呢？事实是，在低版本的 2.7.3 中，确实是这样的，但在 2.7.7 中却不是。
+但问题来了，如果我在一个 **Dubbo 服务**方法中发起多个 **Dubbo 调用**，从调用当前服务的客户端传过来的数据存在 RpcContext 里，发起新的调用时使用的同样也是这个 RpcContext，那么在每个服务端调用完成之后，这个 Context 是不是就要被清理掉呢？事实是，在低版本的 2.7.3 中，确实是这样的，但在 2.7.7 中却不是。
 
 从 Dubbo 2.7.6 起，RpcContext 中增加了一个名为 remove 的标记位。默认值为 true。在清理当前线程的 RpcContext 时候，代码会检查这个标记位的值。如果是 false，则不会执行删除操作。
 
@@ -169,6 +169,91 @@ public class AsyncRpcResult implements Result {
 ```
 
 基于以上的发现，我们就可以得出以下结论。如果在一个 Dubbo 服务的业务逻辑中连续发起多次异步的 Dubbo 服务调用，它们共用的是同一个 RpcContext 对象，也就是服务当前的 RpcContext 对象。如果有部分逻辑依赖了 RpcContext 中保存的与请求直接关联的数据，那么这段逻辑很有可能因读不到正确的数据而无法得到正确的执行结果。
+
+### 重现问题
+
+我们已经知道了导致问题的原因，那么就可以构造一个项目，用最精简的方式来重现这个问题。
+
+重现这个问题有 3 个要点：
+
+1. 自定义的 Filter 和 Listener
+2. 在 Filter 和 Listener 中对 RpcContext 进行了请求相关的读写操作
+3. 在 Dubbo 服务方法内连续多次用异步方式调用其它 Dubbo 服务
+
+所以重现所需的关键代码如下：
+
+```java
+@Activate(group = CommonConstants.CONSUMER, order = -9999)
+public class TestConsumerFilter extends ListenableFilter {
+
+    private final AtomicInteger seq = new AtomicInteger();
+
+    @Override
+    public Result invoke(Invoker<?> invoker, Invocation invocation) throws RpcException {
+        String currentSeq = String.valueOf(seq.incrementAndGet());
+        System.out.println("invoke=" + currentSeq);
+        RpcContext.getContext().setAttachment("Seq", currentSeq);
+
+        return invoker.invoke(invocation);
+    }
+
+    @Override
+    public Listener listener(Invocation invocation) {
+        Listener listener = super.listener(invocation);
+        if (listener == null) {
+            return listener();
+        }
+        return listener;
+    }
+
+    @Override
+    public Listener listener() {
+        return new TestListener();
+    }
+}
+```
+
+```java
+package org.apache.dubbo.demo.provider.test;
+
+import org.apache.dubbo.rpc.*;
+
+public class TestListener implements Filter.Listener {
+
+    @Override
+    public void onResponse(Result appResponse, Invoker<?> invoker, Invocation invocation) {
+        System.out.println("onResponse=" + RpcContext.getContext().getAttachment("Seq"));
+    }
+
+    @Override
+    public void onError(Throwable t, Invoker<?> invoker, Invocation invocation) {
+        System.out.println("onError=" + RpcContext.getContext().getAttachment("Seq"));
+    }
+}
+```
+
+```java
+List<Future<String>> futures = new ArrayList<>();
+for (int i = 0; i < 5; ++i) {
+    int localI = i;
+    CompletableFuture<String> future = RpcContext.getContext().asyncCall(() -> greetingService.hello("#" + localI));
+    futures.add(future);
+}
+```
+
+程序的运行结果如下：
+
+![运行结果](/assets/images/post/2021-05-09_result.png)
+
+如果大家想在本地重现这一问题的话，可以点击[链接](/assets/bin/2021-05-09_dubbo-demo.zip)下载测试代码。具体测试步骤如下：
+
+1. 在本地启动 ZooKeeper，监听默认 2181 端口
+2. 依次启动以下 Java 类
+   1. org.apache.dubbo.demo.provider.GreetingApplication
+   2. org.apache.dubbo.demo.provider.DemoApplication
+   3. org.apache.dubbo.demo.consumer.Application
+3. 在 org.apache.dubbo.demo.consumer.Application 的控制台中按回车键
+4. 观察 org.apache.dubbo.demo.provider.DemoApplication 控制台中的输出结果
 
 ### 从问题引发的思考
 
